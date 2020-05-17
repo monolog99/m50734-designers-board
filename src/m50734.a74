@@ -1,0 +1,1577 @@
+
+	.SECTION MAIN
+	.ORG $F800
+
+;************************************************************************************
+;
+; bit correct M50734 monitor disassembly
+
+LAB_04	= $04				;.
+LAB_06	= $06				;.
+LAB_07	= $07				;.
+LAB_08	= $08				;.
+
+LAB_AF	= $AF				; hex/ASCII and ASCII/hex temp byte
+LAB_B0	= $B0				; hex/ASCII temp byte
+
+LAB_B1	= $B1				; hex record byte count
+LAB_B2	= $B2				; [FROM] address low byte
+LAB_B3	= $B3				; [FROM] address high byte
+LAB_B4	= $B4				; accumulator
+LAB_B5	= $B5				; status register
+LAB_B6	= $B6				; X register
+LAB_B7	= $B7				; Y register
+LAB_B8	= $B8				; stack pointer
+LAB_B9	= $B9				; A temp storage
+LAB_BA	= $BA				; [TO] address low byte
+LAB_BB	= $BB				; [TO] address high byte
+LAB_BC	= $BC				; checksum low byte
+LAB_BD	= $BD				; checksum high byte
+LAB_BE	= $BE				; BREAK address low byte
+LAB_BF	= $BF				; BREAK address high byte
+LAB_C0	= $C0				; byte at the BREAK address
+LAB_C1	= $C1				; BREAK status ($AA = BREAK set)
+LAB_C2	= $C2				; program counter low byte
+LAB_C3	= $C3				; program counter high byte
+
+LAB_C4	= $C4				; TC, CNTR or BRK vector low byte
+LAB_C5	= $C5				; TC, CNTR or BRK vector high byte
+LAB_C6	= $C6				; HE or VE vector low byte
+LAB_C7	= $C7				; HE or VE vector high byte
+LAB_C8	= $C8				; TIMER 1, 2 or 3 vector low byte
+LAB_C9	= $C9				; TIMER 1, 2 or 3 vector high byte
+LAB_CA	= $CA				; RI or INT1 vector low byte
+LAB_CB	= $CB				; RI or INT1 vector high byte
+LAB_CC	= $CC				; INT2 vector low byte
+LAB_CD	= $CD				; INT2 vector high byte
+LAB_CE	= $CE				; TC or CNTR code vector low byte
+LAB_CF	= $CF				; TC or CNTR code vector high byte
+
+;************************************************************************************
+;
+; internal hardware
+
+TR	= $E4				; UART Tx shift register
+RB	= $E5				; UART Rx buffer register
+UACON	= $E6				; UART control register
+UASR	= $E7				; UART status register
+ADCON	= $E9				; A2D control register
+ADSR	= $EA				; A2D register
+P0FR	= $F5				; port 0 function register
+P0D	= $F7				; port 0 data direction register
+TB	= $FB				; BAUD rate generator
+TW	= $FC				; watchdog timer
+
+;************************************************************************************
+;
+; autostart RAM use 
+
+LAB_0200	= $0200			; autostart RAM signature byte
+					; $5A = autostart
+LAB_0201	= $0201			; second signature byte pointer low byte
+LAB_0202	= $0202			; second signature byte pointer high byte
+LAB_0203	= $0203			; autostart RAM code execute address
+
+; to make an autostart RAM image set the origin to $0200 and make the first byte $5A
+; and the next word point to an $A5 byte either in your code or in ROM
+; the code you want to autostart then follows immediately
+
+;	.ORG	$0200
+;
+;	.byte	$5A			; autostart signature byte
+;	.word	$F86D			; pointer to an $A5 byte in ROM
+;
+;start
+;	...				; code goes from here on
+
+;************************************************************************************
+;
+; autostart ROM use
+
+LAB_C000	= $C000			; autostart ROM signature byte
+					; $5A = autostart
+LAB_C001	= $C001			; autostart ROM code execute address
+
+; to make an autostart ROM image set the origin to $C000 and make the first byte $5A
+; the code you want to autostart then follows immediately
+
+;	.ORG	$C000
+;
+;	.byte	$5A			; autostart signature byte
+;
+;start
+;	...				; code goes from here on
+
+;************************************************************************************
+;
+; Start of monitor code
+
+LAB_F800:
+	JMP	(LAB_C4)		; go do the TC, CNTR or BRK vector
+LAB_F802:
+	JMP	(LAB_C6)		; go do the HE or VE vector
+LAB_F804:
+	JMP	(LAB_C8)		; go do the TIMER 1, 2 or 3 vector
+LAB_F806:
+	JMP	(LAB_CA)		; go do the RI or INT1 vector
+LAB_F808:
+	JMP	(LAB_CC)		; go do the INT2 vector
+;LAB_F80A:
+	JMP	(LAB_CE)		; go do the TC or CNTR vector
+
+;************************************************************************************
+;
+; RESET
+
+LAB_F80C:
+	SEI				; disable interrupts
+	CLD				; clear decimal mode
+	CLT				; clear the T bit
+	CLC				; clear the carry
+	CLV				; clear the overflow
+	LDX	#$FF			; set X
+	TXS				; set the stack pointer
+
+; setup port 0 b6 for use by the UART
+
+	LDA	#$40			; set port 0 b6 to UART Tx
+	STA	P0FR			; write the port 0 function register
+	STA	P0D			; write the port 0 data direction register
+
+; setup the UART to 9600 baud 8N1
+
+	LDA	#$C1			; set Tx and Rx enable, Rx interrupt disabled,
+					; timer B f/8, even parity, parity disabled, 8 bit
+	STA	UACON			; write the UART control register
+	LDA	#$05			; set (1/8) * (1(5+1)) * (1/16) baud
+					; this will be 9600 bAUD with a 7.3728MHz XTAL
+	STA	TB			; write the BAUD rate generator
+
+; display startup mesage
+
+	JSR	STARTUP			; display the startup message
+
+; initialise the interrupt vector table
+
+	LDA	#<LAB_F80C		; set RESET vector high byte
+	STA	LAB_C7			; HE or VE vector high byte
+	STA	LAB_C9			; TIMER 1, 2 or 3 vector high byte
+	STA	LAB_CB			; RI or INT1 vector high byte
+	STA	LAB_CD			; INT2 vector high byte
+	STA	LAB_CF			; TC or CNTR code vector high byte
+	LDA	#>LAB_F80C		; set RESET vector low byte
+	STA	LAB_C6			; HE or VE vector low byte
+	STA	LAB_C8			; TIMER 1, 2 or 3 vector low byte
+	STA	LAB_CA			; RI or INT1 vector low byte
+	STA	LAB_CC			; INT2 vector low byte
+	STA	LAB_CE			; TC or CNTR code vector low byte
+
+; setup the TC, CNTR or BRK vector for the monitor BREAK handler
+
+	LDA	#<LAB_F8ED		; set the monitor TC, CNTR or BRK vector high byte
+	STA	LAB_C5			; TC, CNTR or BRK vector high byte
+	LDA	#>LAB_F8ED		; set the monitor TC, CNTR or BRK vector low byte
+	STA	LAB_C4			; TC, CNTR or BRK vector low byte
+
+; check for autostart ROM code
+
+	LDA	LAB_C000		; read the autostart ROM signature byte
+	CMP	#$5A			; compare it with the expected autostart signature byte
+	BNE	LAB_F857		; if it's not an autostart ROM just continue
+
+	JMP	LAB_C001		; else go execute the autostart ROM
+
+; check for autostart RAM code
+
+LAB_F857:
+	LDA	LAB_0200		; read the autostart RAM signature byte
+	CMP	#$5A			; compare it with the expected autostart signature byte
+	BNE	LAB_F873		; if it's not autostart RAM just continue
+
+	LDA	LAB_0201		; else get the second signature byte pointer low byte
+	STA	LAB_B2			; save the address low byte
+	LDA	LAB_0202		; else get the second signature byte pointer high byte
+	STA	LAB_B3			; save the address high byte
+	LDY	#$00			; clear the index
+	LDA	(LAB_B2),Y		; read the second autostart signature byte
+	CMP	#$A5			; compare it with the expected autostart signature byte
+	BNE	LAB_F873		; if it's not autostart RAM just continue
+
+	JMP	LAB_0203		; else go execute the autostart RAM code
+
+LAB_F873:
+	JMP	LAB_F913		; wait for and execute a command
+
+;************************************************************************************
+;
+; receive a character, return Cb = 1 if there was an error
+
+RX_CHAR:
+	JSR	KICK_WATCHDOG		; kick the watchdog
+	LDA	UASR			; read the UART status register
+	AND	#$1C			; mask 000x xx00, the error bits
+	BNE	LAB_F88C		; if any error bits are set return the error
+
+	LDA	UASR			; read the UART status register
+	AND	#$01			; mask 0000 000x, Rx ready
+	BEQ	RX_CHAR			; if Rx isn't ready skip the carry clear
+
+	CLC				; flag ok
+LAB_F887:
+	LDA	RB			; read the UART Rx buffer register
+	STA	RB			; write the UART Rx buffer register
+	RTS
+
+LAB_F88C:
+	SEC				; flag an error
+	BCS	LAB_F887		; go get the Rx byte
+
+;************************************************************************************
+;
+; get the UART Rx status, return Cb = 1 if there was an error
+
+LAB_F88F:
+	LDA	UASR			; read the UART status register
+	AND	#$1C			; mask 000x xx00, the error bits
+	BNE	LAB_F89B		; if any error bits are set return the error
+
+	LDA	UASR			; read the UART status register
+	AND	#$01			; mask 0000 000x, Rx ready
+	CLC				; flag ok
+	RTS
+
+LAB_F89B:
+	LDA	#$00			; clear A
+	SEC				; flag an error
+	RTS
+
+;************************************************************************************
+;
+; Increment the index and send a character
+
+LAB_F89F:
+	INX				; increment the index
+SEND_CHAR:
+	PHA				; save the character
+WAIT_TX:
+	JSR	KICK_WATCHDOG		; kick the watchdog
+	LDA	UASR			; read the UART status register
+	AND	#$02			; mask 0000 00x0, Tx complete
+	BEQ	WAIT_TX			; loop if not ready
+
+	PLA				; restore the character
+	STA	TR			; save the character to the UART Tx shift register
+	RTS
+
+;************************************************************************************
+;
+; send the null terminated string at YX. if Cb = 1 on entry then a newline is sent
+; first
+
+LAB_F8AE:
+	BCC	LAB_F8B3		; if Cb = 0 skip the newline
+
+	JSR	SEND_CRLF		; else send [CR][LF]
+LAB_F8B3:
+	STX	LAB_B3			; save the address high byte
+	STY	LAB_B2			; save the address low byte
+	LDY	#$00			; clear the index
+LAB_F8B9:
+	LDA	(LAB_B2),Y		; get a character from the string
+	BEQ	LAB_F8C4		; if null just exit
+
+	JSR	SEND_CHAR		; send a character
+	INY				; increment the index
+	JMP	LAB_F8B9		; loop for another character
+
+LAB_F8C4:
+	RTS
+
+;************************************************************************************
+;
+; send [CR][LF]
+
+SEND_CRLF:
+	LDA	#$0D			; set [CR]
+	JSR	SEND_CHAR		; send a character
+	LDA	#$0A			; set [LF]
+	JMP	SEND_CHAR		; send a character and return
+
+;************************************************************************************
+;
+; send "?"
+
+SEND_?:
+	LDA	#'?'			; set "?"
+	JMP	SEND_CHAR		; send a character and return
+
+;************************************************************************************
+;
+; receive and echo a character
+
+LAB_F8D4:
+	JSR	RX_CHAR			; receive a character
+	JMP	SEND_CHAR		; send a character and return
+
+;************************************************************************************
+; display the monitor startup message
+
+STARTUP:
+	LDX	#<STARTUP_MSG		; set the monitor startup message pointer high byte
+	LDY	#>STARTUP_MSG		; set the monitor startup message pointer low byte
+	SEC					; flag newline needed
+	JSR	LAB_F8AE		; send the null terminated string at YX
+	JSR	SEND_CRLF		; send [CR][LF]
+	RTS
+
+;************************************************************************************
+;
+; monitor startup message
+
+STARTUP_MSG:
+	.byte	'** M50734 Designers board v1.14 **',$00
+
+;************************************************************************************
+;
+; TC, CNTR or BRK vector points here
+
+LAB_F8ED:
+	STA	LAB_B4			; save the accumulator
+	PLA				; pull the status register
+	PHA				; and put it back
+	AND	#$10			; mask 000x 0000, the break bit
+	BNE	LAB_F8F9		; if set go do the BREAK handler
+
+	LDA	LAB_B4			; else restore the accumulator
+	JMP	(LAB_CE)		; go do the TC or CNTR code vector
+
+; the BREAK handler. save the registers and set the program counter to the BREAK address
+
+LAB_F8F9:
+	PLA				; pull the status register
+	STA	LAB_B5			; save the status register
+	STX	LAB_B6			; save the X register
+	STY	LAB_B7			; save the Y register
+	CLD				; clear decimal mode
+	PLA				; pull the break address low byte
+	SEC				; set carry for subtract
+	SBC	#$01			; adjust the address low byte for the true BREAK address
+	STA	LAB_C2			; save the program counter low byte
+	PLA				; pull the break address high byte
+	SBC	#$00			; adjust the address high byte for the true BREAK address
+	STA	LAB_C3			; save the program counter high byte
+	TSX				; copy the stack pointer
+	STX	LAB_B8			; save the stack pointer
+	CLI				; enable the interrupts
+	JMP	LAB_FC6C		; go display the registers and wait for a command
+
+;************************************************************************************
+;
+; wait for and then execute a command
+
+LAB_F913:
+	LDX	#$FF			; set X
+	TXS				; set the stack pointer
+	CLD				; clear decimal mode
+LAB_F917:
+	LDA	#'#'			; set "#" prompt
+	JSR	SEND_CHAR		; send a character
+	JSR	SEND_SPACE		; send a space
+	JSR	RX_CHAR			; receive a character
+	CMP	#$0D			; compare it with [CR]
+	BNE	LAB_F928		; if not [CR] continue
+
+	JSR	SEND_CRLF		; send [CR][LF]
+	BNE	LAB_F913		; go wait some more, branch always
+
+LAB_F928:
+	JSR	SEND_CHAR		; send a character
+
+;	PHA				; save the character
+;	LDA	#']'			; set "]"
+;	JSR	SEND_CHAR		; send a character
+;	PLA				; restore the character
+
+	LDX	#$10			; set the index to the end of the table
+
+FIND_COMMAND:
+	CMP	LAB_F957,X		; compare the character with a command character
+	BEQ	LAB_F942		; if it is a match go do the command
+	DEX				; else decrement the command table index
+	BPL	FIND_COMMAND		; loop if more to do
+
+	JSR	SEND_?			; else send "?"
+	JSR	SEND_CRLF		; send [CR] [LF]
+	JMP	LAB_F917		; go wait for another command
+
+LAB_F942:
+	TXA				; copy the index
+	ASL	A			; * 2 bytes per word
+	TAX				; copy it back to the index
+	LDA	LAB_F968,X		; get the command address low byte
+	STA	LAB_BA			; save the address low byte
+	LDA	LAB_F968+1,X		; get the command address high byte
+	STA	LAB_BB			; save the address high byte
+	JSR	LAB_F955		; execute the address as a subroutine
+	JMP	LAB_F913		; wait for and execute a command
+
+; execute the code from (LAB_BA)
+
+LAB_F955:
+	JMP	(LAB_BA)		; go to the address
+
+;************************************************************************************
+;
+; command table
+
+LAB_F957:
+	.byte	'A'			; set the accumulator
+	.byte	'B'			; set the BREAK address
+	.byte	'C'			; display the A/D registers
+	.byte	'D'			; send KIM hex records
+	.byte	'G'			; execute code
+	.byte	'L'			; load KIM hex records
+	.byte	'M'			; display memory from [address]
+	.byte	'P'			; set the status register
+	.byte	'R'			; display the registers
+	.byte	'S'			; set the stack pointer
+	.byte	'U'			; load Intel hex records
+	.byte	'V'			; display version
+	.byte	'X'			; set the X register
+	.byte	'Y'			; set the Y register
+	.byte	'Z'			; send Intel hex records
+	.byte	'*'			; set the program counter
+	.byte	'/'			; input byte(s)
+	.byte	'?'			; display the BREAK status
+	.byte	' '			; advance $10 bytes and continue output
+
+; command address table
+
+LAB_F968:
+	.word	SET_ACC			; set the accumulator
+	.word	LAB_F9AF		; set the BREAK address
+	.word	DISP_AD			; display the A/D registers
+	.word	SEND_KIM		; send KIM hex records
+	.word	LAB_FB57		; execute code
+	.word	LAB_FB6A		; load KIM hex records
+	.word	LAB_FC18		; display memory from [address]
+	.word	LAB_F98E		; set the status register
+	.word	LAB_FC6C		; display the registers
+	.word	LAB_F99A		; set the stack pointer
+	.word	LAB_FBC0		; load Intel hex records
+	.word	STARTUP			; display version
+	.word	LAB_F992		; set the X register
+	.word	LAB_F996		; set the Y register
+	.word	LAB_FAA1		; send Intel hex records
+	.word	LAB_FCC9		; set the program counter
+	.word	LAB_FCE3		; input byte(s)
+	.word	LAB_FD15		; display the BREAK status
+	.word	LAB_FC5B		; advance $10 bytes and continue output
+
+;************************************************************************************
+;
+; set the accumulator
+
+SET_ACC:
+	LDX	#LAB_B4-LAB_B4		; index the accumulator
+	BEQ	LAB_F99C		; receive an ASCII hex pair for the byte indexed by X
+					; branch always
+
+;************************************************************************************
+;
+; set the status register
+
+LAB_F98E:
+	LDX	#LAB_B5-LAB_B4		; index the status register
+	BNE	LAB_F99C		; receive an ASCII hex pair for the byte indexed by X
+					; branch always
+
+;************************************************************************************
+;
+; set the X register
+
+LAB_F992:
+	LDX	#LAB_B6-LAB_B4		; index the X register
+	BNE	LAB_F99C		; receive an ASCII hex pair for the byte indexed by X
+					; branch always
+
+;************************************************************************************
+;
+; set the Y register
+
+LAB_F996:
+	LDX	#LAB_B7-LAB_B4		; index the Y register
+	BNE	LAB_F99C		; receive an ASCII hex pair for the byte indexed by X
+					; branch always
+
+;************************************************************************************
+;
+; set the stack pointer
+
+LAB_F99A:
+	LDX	#LAB_B8-LAB_B4		; index the stack pointer
+
+;************************************************************************************
+;
+; receive an ASCII hex pair for the byte indexed by X
+
+LAB_F99C:
+	JSR	SEND_EQ			; send "="
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_F9AA		; if error go send "?"
+
+	STA	LAB_B4,X		; save the byte
+	JSR	SEND_CRLF		; send [CR][LF]
+	RTS
+
+LAB_F9AA:
+	JSR	SEND_?		; send "?"
+	BNE	LAB_F99C		; loop for another try
+
+;************************************************************************************
+;
+; set the BREAK address
+
+LAB_F9AF:
+	JSR	SEND_CRLF		; send [CR][LF]
+	LDA	LAB_C1			; get the BREAK status
+	CMP	#$AA			; compare it with BREAK set
+	BNE	LAB_F9C0		; if not set continue
+
+	LDA	LAB_C0			; get the byte at the BREAK address
+	LDY	#$00			; clear Y
+	STY	LAB_C1			; clear the BREAK status
+	STA	(LAB_BE),Y		; restore the byte at the BREAK address
+LAB_F9C0:
+	LDX	#$00			; clear the index
+LAB_F9C2:
+	LDA	LAB_F9F1,X		; get a "BREAK=" character
+	JSR	SEND_CHAR		; send a character
+	INX				; increment the idex
+	CPX	#LAB_F9F7-LAB_F9F1
+					; compare it with the max + 1
+	BNE	LAB_F9C2		; loop if more to do
+
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCC	LAB_F9D7		; if no error continue
+
+LAB_F9D2:
+	JSR	SEND_?			; else send "?"
+	BNE	LAB_F9C0		; go try again for the BREAK address, branch always
+
+LAB_F9D7:
+	STA	LAB_BF			; save the BREAK address high byte
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_F9D2		; if error go try again for the BREAK address
+
+	STA	LAB_BE			; save the BREAK address low byte
+	LDY	#$00			; clear the index
+	LDA	(LAB_BE),Y		; get the byte at the BREAK address
+	STA	LAB_C0			; save the byte at the BREAK address
+	LDA	#$00			; clear A
+	STA	(LAB_BE),Y		; save a BRK opcode at the BREAK address
+	LDA	#$AA			; set BREAK enabled flag
+	STA	LAB_C1			; save the BREAK status
+	JMP	SEND_SPACE		; send [SPACE] and return
+
+; "BREAK=" string
+
+LAB_F9F1:
+	.byte	'BREAK='		; "BREAK="
+LAB_F9F7:
+	.byte	$09			; ??
+
+;************************************************************************************
+;
+; send KIM hex records
+
+SEND_KIM:
+	JSR	SEND_SPACE		; send [SPACE]
+LAB_F9FB:
+	JSR	LAB_FDE2		; send "FROM="
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCC	LAB_FA08		; if no error continue
+
+LAB_FA03:
+	JSR	SEND_?		; else send "?"
+	BNE	LAB_F9FB		; go try again for the FROM address, branch always
+
+LAB_FA08:
+	STA	LAB_B3			; save the FROM address high byte
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_FA03		; if error go try again for the FROM address
+
+	STA	LAB_B2			; save the FROM address low byte
+LAB_FA11:
+	JSR	SEND_SPACE		; send [SPACE]
+	JSR	LAB_FDF5		; send "TO="
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCC	LAB_FA21		; if no error continue
+
+LAB_FA1C:
+	JSR	SEND_?		; send "?"
+	BNE	LAB_FA11		; go try again for the TO address, branch always
+
+LAB_FA21:
+	STA	LAB_BB			; save the TO address high byte
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_FA1C		; if error go try again for the TO address
+
+	STA	LAB_BA			; save the TO address low byte
+
+	LDA	LAB_B3			; get the FROM address high byte
+	CMP	LAB_BB			; compare it with the TO address high byte
+	BCC	LAB_FA3A		; if FROM < TO go send the hex record(s)
+
+	BNE	LAB_FA03		; if FROM > TO go try again for both address
+
+					; else they were equal so compare the low bytes
+	LDA	LAB_B2			; get the FROM address low byte
+	CMP	LAB_BA			; compare it with the TO address low byte
+	BCC	LAB_FA3A		; if FROM < TO go send the hex record(s)
+
+	BCS	LAB_FA03		; if FROM >= TO go try again for both address,
+					; branch always
+
+LAB_FA3A:
+	JSR	SEND_CRLF		; send [CR][LF]
+	LDA	#';'			; set ";", KIM hex record start character
+	JSR	SEND_CHAR		; send a character
+	LDY	#$00			; clear the read index
+	STY	LAB_BD			; clear the checksum high byte
+
+	LDA	LAB_BA			; get the TO address low byte
+	SEC				; set carry for subtract
+	SBC	LAB_B2			; subtract the FROM address low byte
+	PHA				; save the data size low byte
+	LDA	LAB_BB			; get the TO address high byte
+	SBC	LAB_B3			; subtract the FROM address high byte
+	BNE	LAB_FA5B		; if the high byte is non zero go do an $18 byte record
+
+	PLA				; restore the data size low byte
+	BEQ	LAB_FA90		; if zero go send the zero length record and return
+
+	CMP	#$18			; compare the data size low byte with the max record length
+	BCC	LAB_FA5E		; if < $18 go send the record
+
+	BCS	LAB_FA5C		; else go use the default $18 byte length, branch always
+
+LAB_FA5B:
+	PLA				; dump the data size low byte
+LAB_FA5C:
+	LDA	#$18			; default to $18 bytes
+LAB_FA5E:
+	STA	LAB_B1			; save the record byte count
+	STA	LAB_BC			; save the checksum low byte
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	LDA	LAB_B3			; get the FROM address high byte
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+	LDA	LAB_B2			; get the FROM address low byte
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+LAB_FA6F:
+	LDA	(LAB_B2),Y		; get a data byte
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+	INY				; increment the read index
+	CPY	LAB_B1			; compare it with the record byte count
+	BNE	LAB_FA6F		; loop if more bytes to do
+
+	LDA	LAB_BD			; get the checksum high byte
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	LDA	LAB_BC			; get the checksum low byte
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	TYA				; copy the index
+	CLC				; clear carry for add
+	ADC	LAB_B2			; add the index to the FROM address low byte
+	STA	LAB_B2			; save the FROM address low byte
+	BCC	LAB_FA3A		; if no carry go send another record
+
+	INC	LAB_B3			; else increment the FROM address high byte
+	JMP	LAB_FA3A		; go send another record
+
+; send the zero length record and return
+
+LAB_FA90:
+	LDA	#'0'			; set "0"
+	JSR	SEND_CHAR		; send a character
+	JSR	SEND_CHAR		; send a character
+	JMP	SEND_CRLF		; send [CR][LF] and return
+
+;************************************************************************************
+;
+; add A to the checksum and send it as an ASCII hex pair
+
+LAB_FA9B:
+	JSR	LAB_FE06		; add A to the checksum word
+	JMP	LAB_FDD5		; send A as an ASCII hex pair and return
+
+;************************************************************************************
+;
+; send Intel hex records
+
+LAB_FAA1:
+	JSR	SEND_SPACE		; send [SPACE]
+LAB_FAA4:
+	JSR	LAB_FDE2		; send "FROM="
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCC	LAB_FAB1		; if no error continue
+
+LAB_FAAC:
+	JSR	SEND_?		; else send "?"
+	BNE	LAB_FAA4		; go try again for the FROM address, branch always
+
+LAB_FAB1:
+	STA	LAB_B3			; save the FROM address high byte
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_FAAC		; if error go try again for the FROM address
+
+	STA	LAB_B2			; save the FROM address low byte
+LAB_FABA:
+	JSR	SEND_SPACE		; send [SPACE]
+	JSR	LAB_FDF5		; send "TO="
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCC	LAB_FACA		; if no error continue
+
+LAB_FAC5:
+	JSR	SEND_?		; else send "?"
+	BNE	LAB_FABA		; go try again for the TO address, branch always
+
+LAB_FACA:
+	STA	LAB_BB			; save the TO address high byte
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_FAC5		; if error go try again for the TO address
+
+	STA	LAB_BA			; save the TO address low byte
+
+	LDA	LAB_B3			; get the FROM address high byte
+	CMP	LAB_BB			; compare it with the TO address high byte
+	BCC	LAB_FAE3		; if FROM < TO go send the hex record(s)
+
+	BNE	LAB_FAAC		; if FROM > TO go try again for both address
+
+					; else they were equal so compare the low bytes
+	LDA	LAB_B2			; get the FROM address low byte
+	CMP	LAB_BA			; compare it with the TO address low byte
+	BCC	LAB_FAE3		; if FROM < TO go send the hex record(s)
+
+	BCS	LAB_FAAC		; if FROM >= TO go try again for both address,
+					; branch always
+	
+LAB_FAE3:
+	JSR	SEND_CRLF		; send [CR][LF]
+	LDA	#':'			; set ":", Intel hex record start character
+	JSR	SEND_CHAR		; send a character
+	LDY	#$00			; clear the read index
+	STY	LAB_BD			; clear the checksum high byte
+	STA	LAB_BC			; save the checksum low byte
+
+	LDA	LAB_BA			; get the TO address low byte
+	SEC				; set carry for subtract
+	SBC	LAB_B2			; subtract the FROM address low byte
+	PHA				; save the data size low byte
+	LDA	LAB_BB			; get the TO address high byte
+	SBC	LAB_B3			; subtract the FROM address high byte
+	BNE	LAB_FB06		; if the high byte is non zero go do a $10 byte record
+
+	PLA				; restore the data size low byte
+	BEQ	LAB_FB3E		; if zero go send the end record and return
+
+	CMP	#$10			; compare the data size low byte with the max record length
+	BCC	LAB_FB09		; if < $10 go send the record
+
+	BCS	LAB_FB07		; else go use the default $18 byte length, branch always
+
+LAB_FB06:
+	PLA				; dump the data size low byte
+LAB_FB07:
+	LDA	#$10			; else default to $10 bytes
+LAB_FB09:
+	STA	LAB_B1			; save the record byte count
+	STA	LAB_BC			; save the checksum low byte
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	LDA	LAB_B3			; get the FROM address high byte
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+	LDA	LAB_B2			; get the FROM address low byte
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+	LDA	#$00			; set the record type to $00, data record
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+LAB_FB1F:
+	LDA	(LAB_B2),Y		; get a data byte
+	JSR	LAB_FA9B		; add A to the checksum and send it as an ASCII hex pair
+	INY				; increment the read index
+	CPY	LAB_B1			; compare it with the record byte count
+	BNE	LAB_FB1F		; loop if more bytes to do
+
+	LDA	#$00			; clear A
+	SEC				; set carry for subtract
+	SBC	LAB_BC			; subtract the checksum low byte
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	TYA				; copy the index
+	CLC				; clear carry for add
+	ADC	LAB_B2			; add the index to the FROM address low byte
+	STA	LAB_B2			; save the FROM address low byte
+	BCC	LAB_FAE3		; if no carry go send another record
+
+	INC	LAB_B3			; else increment the FROM address high byte
+	JMP	LAB_FAE3		; go send another record
+
+; write the rest of a terminating record - "00000001FF"
+
+LAB_FB3E:
+	LDY	#$00			; clear the byte count
+LAB_FB40:
+	LDA	#$00			; clear A
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	INY					; increment the count
+	CPY	#$03			; compare it with the max + 1
+	BNE	LAB_FB40		; loop if more to do
+
+	LDA	#$01			; set record type $01, end record
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	LDA	#$FF			; set the checksum
+	JSR	LAB_FDD5		; send A as an ASCII hex pair
+	JMP	SEND_CRLF		; send [CR][LF] and return
+
+;************************************************************************************
+;
+; print out all A2D converters
+
+DISP_AD:
+	JSR	SEND_SPACE
+	LDY	#$00			; clear the byte count
+A2D_CHX:
+	TYA
+	JSR	LAB_FDD5		; print out the channel number as ASCII pair
+	JSR	SEND_EQ			; send '=' 
+	TYA					; copy Index to A
+	SEI					; disable interrupts
+	JSR	READ_A2D
+	CLI					; enable interrupts
+	JSR	LAB_FDD5		; print out value of A2D channel
+	JSR	SEND_SPACE		; insert a space
+
+	INY					; move onto the next A2D channel
+	CPY	#$04			; compare the A2D channels with maximum + 1
+	BCC	A2D_CHX			; loop if more to do
+	JMP	SEND_CRLF		; send space then return
+
+;************************************************************************************
+;
+; execute the code from the saved program counter
+
+LAB_FB57:
+	LDX	LAB_B8			; get the stack pointer
+	TXS				; set the stack pointer
+	LDX	LAB_B6			; get the X register
+	LDY	LAB_B7			; get the Y register
+	LDA	LAB_C3			; get the program counter high byte
+	PHA				; push it
+	LDA	LAB_C2			; get the program counter low byte
+	PHA				; push it
+	LDA	LAB_B5			; get the status register
+	PHA				; push it
+	LDA	LAB_B4			; get the accumulator
+	RTI
+
+;************************************************************************************
+;
+; load KIM hex records
+;
+; this routine waits for a KIM record start character, ";", then receives a KIM hex
+; record. This is repeated until a zero length record is received when the monitor
+; will reset. If an error is encountered it sends " LOAD ERROR" and then resets
+
+LAB_FB6A:
+	JSR	RX_CHAR			; receive a character
+	CMP	#';'			; compare it with ";"
+	BNE	LAB_FB6A		; if it isn't ";" go get another character
+
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	CMP	#$00			; compare the record byte count with zero
+	BEQ	LAB_FBBD		; if the byte count is zero go run the RESET code
+
+	STA	LAB_B1			; save the byte count
+	LDY	#$00			; clear the save index
+	STY	LAB_BD			; clear the checksum high byte
+	STA	LAB_BC			; save the checksum low byte
+
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	STA	LAB_B3			; save the address high byte
+	JSR	LAB_FE06		; add A to the checksum word
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	STA	LAB_B2			; save the address low byte
+	JSR	LAB_FE06		; add A to the checksum word
+LAB_FB90:
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	STA	(LAB_B2),Y		; save the byte to memory
+	JSR	LAB_FE06		; add A to the checksum word
+	INY				; increment the save index
+	CPY	LAB_B1			; compare it with the count
+	BNE	LAB_FB90		; loop if more to do
+
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	CMP	LAB_BD			; compare it with the checksum high byte
+	BNE	LAB_FBAD		; if different send " LOAD ERROR" and then reset
+
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	CMP	LAB_BC			; compare it with the checksum low byte
+	BNE	LAB_FBAD		; if different send " LOAD ERROR" and then reset
+
+	BEQ	LAB_FB6A		; go get another record, branch always
+
+;************************************************************************************
+;
+; send " LOAD ERROR" and then reset
+
+LAB_FBAD:
+	JSR	SEND_SPACE		; send [SPACE]
+	LDX	#$00			; clear the index
+LAB_FBB2:
+	LDA	LAB_FC0D,X		; get a " LOAD ERROR" string character
+	JSR	SEND_CHAR		; send a character
+	INX				; increment the index
+	CPX	#LAB_FC0X-LAB_FC0D
+					; compare the index with the max + 1
+	BNE	LAB_FBB2		; loop if more characters to do
+
+;************************************************************************************
+;
+; go run the RESET code
+
+LAB_FBBD:
+	JMP	LAB_F80C		; go run the RESET code
+
+;************************************************************************************
+;
+; load Intel hex records
+;
+; this routine waits for an Intel record start character, ":", then receives an INTEL
+; hex record. This is repeated until a terminating record is received when the monitor
+; will reset. If an error is encountered it sends " LOAD ERROR" and then resets
+
+LAB_FBC0:
+	JSR	RX_CHAR			; receive a character
+	CMP	#':'			; compare it with ":"
+	BNE	LAB_FBC0		; if it isn't ":" go get another character
+
+	LDY	#$00			; clear the write index
+	STY	LAB_BD			; clear the checksum high byte
+	STY	LAB_BC			; clear the checksum low byte
+	JSR	LAB_FC07		; receive an ASCII hex pair and add it to the checksum
+	STA	LAB_B1			; save the byte count
+	JSR	LAB_FC07		; receive an ASCII hex pair and add it to the checksum
+	STA	LAB_B3			; save the address high byte
+	JSR	LAB_FC07		; receive an ASCII hex pair and add it to the checksum
+	STA	LAB_B2			; save the address low byte
+	JSR	LAB_FC07		; receive an ASCII hex pair and add it to the checksum
+	CMP	#$01			; compare the record type with $01
+	BEQ	LAB_FBFE		; if it is type $01 go exit the Intel load routine
+
+LAB_FBE3:
+	JSR	LAB_FC07		; receive an ASCII hex pair and add it to the checksum
+	STA	(LAB_B2),Y		; save the byte to memory
+	INY				; increment the save index
+	CPY	LAB_B1			; compare it with the count
+	BNE	LAB_FBE3		; loop if more to do
+
+	LDA	#$00			; clear A
+	SEC				; set carry for subtract
+	SBC	LAB_BC			; subtract the checksum low byte
+	STA	LAB_BC			; save the checksum low byte
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	CMP	LAB_BC			; compare it with the checksum low byte
+	BEQ	LAB_FBC0		; if ok go get another record
+
+	JMP	LAB_FBAD		; else send " LOAD ERROR" and then reset
+
+LAB_FBFE:
+	JSR	RX_CHAR			; receive a character, should be "F"
+	JSR	RX_CHAR			; receive a character, should be "F"
+	JMP	LAB_F80C		; go run the RESET code
+
+;************************************************************************************
+;
+; receive an ASCII hex pair and add it to the checksum
+
+LAB_FC07:
+	JSR	LAB_FD54		; receive and convert an ASCII hex pair
+	JMP	LAB_FE06		; add A to the checksum word and return
+
+;************************************************************************************
+;
+; " LOAD ERROR" string
+
+LAB_FC0D:
+	.byte	' LOAD ERROR'		; " LOAD ERROR"
+LAB_FC0X:
+
+;************************************************************************************
+;
+; display memory from [address]
+
+LAB_FC18:
+	JSR	SEND_EQ			; send "="
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCC	LAB_FC25		; if no error continue
+
+LAB_FC20:
+	JSR	SEND_?		; else send "?"
+	BNE	LAB_FC18		; go try again, branch always
+
+LAB_FC25:
+	STA	LAB_B3			; save the address high byte
+	JSR	LAB_FD60		; receive an ASCII hex pair or return an error
+	BCS	LAB_FC20		; if error go try again for the address
+
+	STA	LAB_B2			; save the address low byte
+
+;************************************************************************************
+;
+; display memory
+
+LAB_FC2E:
+	JSR	SEND_CRLF		; send [CR][LF]
+	LDA	LAB_B3			; get the address high byte
+	JSR	LAB_FDC8		; send A as an ASCII hex pair
+	LDA	LAB_B2			; get the address low byte
+	JSR	LAB_FDC8		; send A as an ASCII hex pair
+	JSR	SEND_SPACE		; send [SPACE]
+
+	LDY	#$00			; clear the read index
+LAB_FC40:
+	LDA	(LAB_B2),Y		; get the byte from memory
+	JSR	LAB_FCC1		; send A as an ASCII hex pair;[SPACE]
+	INY					; increment the save index
+	CPY	#$10			; compare it with the max + 1
+	BNE	LAB_FC40		; loop if more to do
+
+	JSR	RX_CHAR			; receive a character
+	CMP	#' '			; compare it with [SPACE]
+	BEQ	LAB_FC5D		; if [SPACE] go output the next line
+
+	CMP	#'/'			; compare it with "/"
+	BEQ	LAB_FC58		; if it is "/" go input byte(s)
+
+	JMP	SEND_CRLF		; else send [CR][LF] and return
+
+LAB_FC58:
+	JMP	LAB_FCE3		; go input byte(s)
+
+;************************************************************************************
+;
+; advance $10 bytes and continue output
+
+LAB_FC5B:
+	LDY	#$10			; set the advance size
+
+;************************************************************************************
+;
+; output the next line
+
+LAB_FC5D:
+	TYA					; copy the index
+	CLC					; clear carry for add
+	ADC	LAB_B2			; add the address low byte
+	STA	LAB_B2			; save the address low byte
+	LDA	#$00			; clear A
+	ADC	LAB_B3			; add the address high byte
+	STA	LAB_B3			; save the address high byte
+	JMP	LAB_FC2E		; go display memory
+
+;************************************************************************************
+;
+; display the registers and wait for a command
+
+LAB_FC6C:
+	JSR	SEND_CRLF			; send [CR][LF]
+	LDA	#'*'				; set "*"
+	JSR	LAB_FCB9			; send CHR$(A);"="
+	LDA	LAB_C3				; get the program counter high byte
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+	LDA	LAB_C2				; get the program counter low byte
+	JSR	LAB_FCC1			; send A as an ASCII hex pair;[SPACE]
+	LDA	#'P'				; set "P"
+	JSR	LAB_FCB9			; send CHR$(A);"="
+	LDA	LAB_B5				; get the status register
+	JSR	LAB_FCC1			; send A as an ASCII hex pair;[SPACE]
+	LDA	#'S'				; set "S"
+	JSR	LAB_FCB9			; send CHR$(A);"="
+	LDA	LAB_B8				; get the stack pointer
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+	JSR	SEND_SPACE			; send [SPACE]
+	LDA	#'A'				; set "A"
+	JSR	LAB_FCB9			; send CHR$(A);"="
+	LDA	LAB_B4				; get the accumulator
+	JSR	LAB_FCC1			; send A as an ASCII hex pair;[SPACE]
+	LDA	#'X'				; set "X"
+	JSR	LAB_FCB9			; send CHR$(A);"="
+	LDA	LAB_B6				; get the X register
+	JSR	LAB_FCC1			; send A as an ASCII hex pair;[SPACE]
+	LDA	#'Y'				; set "Y"
+	JSR	LAB_FCB9			; send CHR$(A);"="
+	LDA	LAB_B7				; get the Y register
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+	JSR	SEND_CRLF			; send [CR][LF]
+	JMP	LAB_F913			; wait for and execute a command
+
+;************************************************************************************
+;
+; send CHR$(A);"="
+
+LAB_FCB9:
+	JSR	SEND_CHAR			; send a character
+
+;************************************************************************************
+;
+; send "="
+
+SEND_EQ:
+	LDA	#'='				; set "="
+	JMP	SEND_CHAR			; send a character and return
+
+;************************************************************************************
+;
+; send A as an ASCII hex pair;[SPACE]
+
+LAB_FCC1:
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+
+;************************************************************************************
+;
+; send [SPACE]
+
+SEND_SPACE:
+	LDA	#' '				; set [SPACE]
+	JMP	SEND_CHAR			; send a character and return
+
+;************************************************************************************
+;
+; set the program counter
+
+LAB_FCC9:
+	JSR	SEND_EQ				; send "="
+	JSR	LAB_FD60			; receive an ASCII hex pair or return an error
+	BCC	LAB_FCD7			; if no error continue
+
+	JSR	SEND_?				; else send "?"
+LAB_FCD4:
+	JMP	LAB_FCC9			; go try again for the program counter address, branch
+							; always
+
+LAB_FCD7:
+	STA	LAB_C3				; save the program counter high byte
+	JSR	LAB_FD60			; receive an ASCII hex pair or return an error
+	BCS	LAB_FCD4			; if error go try again for the program counter address
+
+	STA	LAB_C2				; save the program counter low byte
+	JMP	SEND_SPACE			; send [SPACE] and return
+
+;************************************************************************************
+;
+; input byte(s)
+
+LAB_FCE3:
+	JSR	SEND_CRLF			; send [CR][LF]
+	LDA	LAB_B3				; get the address high byte
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+	LDA	LAB_B2				; get the address low byte
+	LDY	#$00				; clear the index
+	JSR	LAB_FCC1			; send A as an ASCII hex pair;[SPACE]
+LAB_FCF2:
+	JSR	LAB_FD60			; receive an ASCII hex pair or return an error
+	BCS	LAB_FD0B			; if there was an error go check for [CR]
+
+	STA	(LAB_B2),Y			; save the byte to memory
+LAB_FCF9:
+	JSR	SEND_SPACE			; send [SPACE]
+	INY						; increment the index
+	CPY	#$10				; compare it with max + 1
+	BNE	LAB_FCF2			; if not done yet loop for more bytes
+
+	JSR	RX_CHAR				; receive a character
+	CMP	#' '				; compare it with [SPACE]
+	BNE	LAB_FD14			; if not [SPACE] just exit
+
+	JMP	LAB_FC5D			; else go output the next line
+
+LAB_FD0B:
+	CMP	#$0D				; compare it with [CR]
+	BEQ	LAB_FD14			; if it is [CR] just exit
+
+	JSR	SEND_SPACE			; else send [SPACE]
+	BNE	LAB_FCF9			; and go try for another byte
+
+LAB_FD14:
+	RTS
+
+;************************************************************************************
+;
+; display the BREAK status
+
+LAB_FD15:
+	JSR	SEND_CRLF			; send [CR][LF]
+	LDX	#$00				; clear the index
+	LDA	LAB_C1				; get the BREAK status
+	CMP	#$AA				; compare thw status with BREAK set
+	BNE	LAB_FD37			; if not set go send "NO BREAK"
+
+LAB_FD20:
+	LDA	LAB_FD43,X			; get a character from the "BREAK AT " string
+	JSR	LAB_F89F			; increment the index and send a character
+	CPX	#LAB_FDX3-LAB_FD43
+							; compare the index with max + 1
+	BNE	LAB_FD20			; loop if more to do
+
+	LDA	LAB_BF				; get the BREAK address high byte
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+	LDA	LAB_BE				; get the BREAK address low byte
+	JSR	LAB_FDC8			; send A as an ASCII hex pair
+LAB_FD34:
+	JMP	SEND_SPACE			; send [SPACE] and return
+
+LAB_FD37:
+	LDA	LAB_FD4C,X			; get a character from the "NO BREAK" string
+	JSR	LAB_F89F			; increment the index and send a character
+	CPX	#LAB_FDXC-LAB_FD4C
+							; compare the index with max + 1
+	BNE	LAB_FD37			; loop if more to do
+
+	BEQ	LAB_FD34			; send [SPACE] and return, branch always
+
+; break status strings
+
+LAB_FD43:
+	.byte	'BREAK AT '		; "BREAK AT "
+LAB_FDX3:
+
+LAB_FD4C:
+	.byte	'NO BREAK'		; "NO BREAK"
+LAB_FDXC:
+
+;************************************************************************************
+;
+; receive and convert an ASCII hex pair
+
+LAB_FD54:
+	JSR	RX_CHAR				; receive a character
+	JSR	ASCII2HEX			; convert A from ASCII to hex and shift it into LAB_AF
+	JSR	RX_CHAR				; receive a character
+	JMP	ASCII2HEX			; convert A from ASCII to hex and shift it into LAB_AF
+							; and return
+
+;************************************************************************************
+;
+; receive an ASCII hex pair or return an error
+
+LAB_FD60:
+	JSR	RX_CHAR				; receive a character
+	CMP	#$0D				; compare the character with [CR]
+	BEQ	LAB_FD74			; if it is [CR] go return an error
+
+	JSR	SEND_CHAR			; send a character
+	CMP	#' '				; compare the character with [SPACE]
+	BEQ	LAB_FD74			; if it is [SPACE] go return an error
+
+	CMP	#'.'				; compare the character with "."
+	BNE	LAB_FD76			; if it isn't "." got try hex conversion
+
+	LDA	#' '				; else set " "
+LAB_FD74:
+	SEC						; flag error
+	RTS
+
+LAB_FD76:
+	JSR	ASCII2HEX			; convert A from ASCII to hex and shift it into LAB_AF
+	BCS	LAB_FD74			; if error go return it
+
+	JSR	LAB_F8D4			; receive and echo a character
+	JMP	ASCII2HEX			; convert A from ASCII to hex and shift it into LAB_AF
+							; and return
+
+;************************************************************************************
+;
+; convert A to hex and shift it into a cleared LAB_AF
+
+LAB_FD81:
+	PHA						; save A
+	LDA	#$00				; clear A
+	STA	LAB_AF				; clear LAB_AF
+	PLA						; restore A
+
+;************************************************************************************
+;
+; convert A from ASCII to hex and shift it into LAB_AF
+
+ASCII2HEX:
+	CMP	#$30				; compare the character with "0"
+	BCC	LAB_FD74			; if less than "0" go return an error
+
+	CMP	#'F'+1				; compare the character with "F" + 1
+	BCS	LAB_FD74			; if greater than "F" go return an error
+
+	CMP	#'9'+1				; compare the character with "9" + 1
+	BCC	LAB_FD99			; if less than "9" go convert it to binary
+
+	CMP	#'A'-1				; compare the character with "A" - 1
+							; I think this /should/ be CMP #'A'
+	BCC	LAB_FD74			; if less than "A" - 1 go return an error
+
+	ADC	#$08				; adjust for "A" to "F"
+LAB_FD99:
+	ROL	A					; shift the ..
+	ROL	A					; .. low nibble ..
+	ROL	A					; .. to the high ..
+	ROL	A					; .. nibble
+
+	STX	LAB_B0				; save X
+	LDX	#$04				; set the count
+LAB_FDA1:
+	ROL	A					; exchange a high nibble A bit ..
+	ROL	LAB_AF				; .. with a high nibble LAB_AF bit
+	DEX						; decrement the count
+	BNE	LAB_FDA1			; loop if more to do
+
+	LDX	LAB_B0				; restore X
+	LDA	LAB_AF				; get the shifted byte
+	CLC						; flag ok
+	RTS
+
+;************************************************************************************
+;
+; convert A from hex to ASCII in LAB_AF/LAB_B0
+
+HEX2ASCII:
+	PHA						; save A
+	LSR	A					; shift the ..
+	LSR	A					; .. high nibble ..
+	LSR	A					; .. to the low ..
+	LSR	A					; .. nibble
+	JSR	LAB_FDBA			; convert nibble A to ASCII
+	STA	LAB_AF				; save the high nibble character
+	PLA						; restore A
+	AND	#$0F				; mask the low nibble
+	
+;************************************************************************************
+;
+; convert nibble A to ASCII and save it to LAB_B0
+
+LAB_FDBA:
+	CMP	#$0A				; compare the nibble with $0A
+	BCC	LAB_FDC3			; if < $0A just go convert it
+
+	ADC	#$36				; else convert $0A to $0F to "A" ro "F"
+	STA	LAB_B0				; save the converted character
+	RTS
+
+LAB_FDC3:
+	ORA	#$30				; convert $00 to $09 to "0" ro "9"
+	STA	LAB_B0				; save the converted character
+	RTS
+
+;************************************************************************************
+;
+; send A as an ASCII hex pair
+
+LAB_FDC8:
+	JSR	HEX2ASCII			; convert A from hex to ASCII in LAB_AF/LAB_B0
+	LDA	LAB_AF				; get the high hex character
+	JSR	SEND_CHAR			; send a character
+	LDA	LAB_B0				; get the low hex character
+	JMP	SEND_CHAR			; send a character and return
+
+;************************************************************************************
+;
+; send A as an ASCII hex pair
+
+LAB_FDD5:
+	JSR	HEX2ASCII			; convert A from hex to ASCII in LAB_AF/LAB_B0
+	LDA	LAB_AF				; get the high hex character
+	JSR	SEND_CHAR			; send a character
+	LDA	LAB_B0				; get the low hex character
+	JMP	SEND_CHAR			; send a character and return
+
+;************************************************************************************
+;
+; send "FROM="
+
+LAB_FDE2:
+	LDX	#$00				; clear the index
+LAB_FDE4:
+	LDA	LAB_FDEF,X			; get a "FROM=" string character
+	JSR	LAB_F89F			; increment the index and send a character
+	CPX	#LAB_FDF4-LAB_FDEF
+							; compare the index with the max + 1
+	BNE	LAB_FDE4			; loop if more characters to do
+
+	RTS
+
+; "FROM=" string
+
+LAB_FDEF:
+	.byte	'FROM='			; "FROM="
+LAB_FDF4:
+	.byte	$09				; ??
+
+;************************************************************************************
+;
+; send "TO="
+
+LAB_FDF5:
+	LDX	#$00				; clear the index
+LAB_FDF7:
+	LDA	LAB_FE02,X			; get a "TO=" string character
+	JSR	LAB_F89F			; increment the index and send a character
+	CPX	#LAB_FE05-LAB_FE02
+							; compare the index with the max + 1
+	BNE	LAB_FDF7			; loop if more characters to do
+
+	RTS
+
+; "TO=" string
+
+LAB_FE02:
+	.byte	'TO='			; "TO="
+LAB_FE05:
+	.byte	$09				; ??
+
+;************************************************************************************
+;
+; add A to the checksum word
+
+LAB_FE06:
+	PHA						; save A
+	CLC						; clear carry for add
+	ADC	LAB_BC				; add A to the word low nyte
+	STA	LAB_BC				; save the word low byte
+	BCC	LAB_FE10			; if no carry skip the high byte increment
+
+	INC	LAB_BD				; else increment the high byte
+LAB_FE10:
+	PLA						; restore A
+	RTS
+
+;************************************************************************************
+;
+; ??
+
+LAB_FE12:
+	STA	LAB_B9				; save A
+	TYA						; copy Y
+	PHA						; save Y
+	TXA						; copy X
+	PHA						; save X
+	JSR	LAB_FE2A			;..
+	LDA	LAB_B9				; restore A
+	RTS
+
+;************************************************************************************
+;
+; ??
+
+LAB_FE1E:
+	STA	LAB_B9				; save A
+	JSR	LAB_FE2A			;..
+	PLA						; pull X
+	TAX						; restore X
+	PLA						; pull Y
+	TAY						; restore Y
+	LDA	LAB_B9				; restore A
+	RTS
+
+;************************************************************************************
+;
+; ??
+
+LAB_FE2A:
+	TSX						; copy the stack pointer
+	LDA	#$02				;.
+LAB_FE2D:
+	PHA						;.
+	LDA	LAB_06,X			;.
+	LDY	LAB_04,X			;.
+	STA	LAB_04,X			;.
+	TYA						;.
+	STA	LAB_06,X			;.
+	DEX						;.
+	PLA						;.
+	SEC						;.
+	SBC	#$01				;.
+	BNE	LAB_FE2D			;.
+
+	LDA	LAB_08,X			;.
+	TAY						;.
+	LDA	LAB_07,X			;.
+	TAX						;.
+	RTS
+
+;************************************************************************************
+;
+; kick the watchdog
+
+KICK_WATCHDOG:
+	PHA						; save A
+	LDA	#$FF				; set $FF
+	STA	TW					; kick the watchdog timer
+	PLA						; restore A
+	RTS
+
+;************************************************************************************
+;
+; read A2D channel [A]
+
+READ_A2D:
+	BBC	2, ADCON, READ_A2D	; loop if not ready
+	AND	#$03				; mask 0000 00xx, the channel number
+	STA	ADCON				; write the A2D control register
+WAIT_A2D:
+	LDA	ADCON				; read the A2D control register
+	AND	#$04				; mask 0000 0x00, the conversion complete bit
+	BEQ	WAIT_A2D			; loop if not complete
+
+	LDA	ADSR				; read the A2D data register
+	RTS
+
+;************************************************************************************
+;
+; monitor fixed entry point table
+
+	.ORG	$FF00
+
+LAB_FF00:
+	JMP	RX_CHAR				; receive a character
+	JMP	LAB_F88F			; get the UART Rx status
+	JMP	SEND_CHAR			; send a character
+	JMP	LAB_F8D4			; receive and echo a character
+	JMP	SEND_CRLF			; send [CR][LF]
+	JMP	SEND_?				; send "?"
+	JMP	SEND_EQ				; send "="
+	JMP	SEND_SPACE			; send [SPACE]
+	JMP	LAB_F913			; wait for and execute a command
+	JMP	LAB_FB6A			; load KIM hex records
+	JMP	LAB_FBC0			; load Intel hex records
+	JMP	LAB_FD60			; receive an ASCII hex pair or return an error
+	JMP	ASCII2HEX			; convert A from ASCII to hex and shift it into LAB_AF
+	JMP	HEX2ASCII			; convert A from hex to ASCII in LAB_AF/LAB_B0
+	JMP	LAB_FDD5			; send A as an ASCII hex pair
+	JMP	LAB_FE06			; add A to the checksum word
+	JMP	LAB_FE12			;..
+	JMP	LAB_FE1E			;..
+	JMP	LAB_F8AE			; send the null terminated string at YX
+	JMP	KICK_WATCHDOG		; kick the watchdog
+	JMP	READ_A2D			; read A2D channel [A]
+
+;************************************************************************************
+;
+; processor vectors
+
+	.ORG	$FFF4			; vectors start address
+
+	.word	LAB_F800		; TC, CNTR or BRK
+	.word	LAB_F802		; HE or VE
+	.word	LAB_F804		; TIMER 1, 2 or 3
+	.word	LAB_F806		; RI or INT1
+	.word	LAB_F808		; INT2
+	.word	LAB_F80C		; RESET
+
+	.END
+
+;************************************************************************************
